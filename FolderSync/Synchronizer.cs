@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+
 namespace FolderSync
 {
     internal sealed class Synchronizer
@@ -16,20 +18,95 @@ namespace FolderSync
         public Task SyncOnceAsync(CancellationToken ct)
         {
             var sourceFiles = Directory.EnumerateFiles(_sourceRoot, "*", SearchOption.AllDirectories).ToList();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var srcFile in sourceFiles)
             {
                 ct.ThrowIfCancellationRequested();
                 var rel = Path.GetRelativePath(_sourceRoot, srcFile);
                 var dstFile = Path.Combine(_replicaRoot, rel);
+                seen.Add(rel);
                 Directory.CreateDirectory(Path.GetDirectoryName(dstFile)!);
                 if (!File.Exists(dstFile))
                 {
                     File.Copy(srcFile, dstFile, overwrite: false);
                     _logger.Action($"CREATE  {rel}");
                 }
+                else
+                {
+                    if (FilesDiffer(srcFile, dstFile))
+                    {
+                        File.Copy(srcFile, dstFile, overwrite: true);
+                        _logger.Action($"UPDATE  {rel}");
+                    }
+                    else
+                    {
+                        _logger.Debug($"SKIP  {rel} (unchanged)");
+                    }
+                }
             }
 
+            var replicaFiles = Directory.EnumerateFiles(_replicaRoot, "*", SearchOption.AllDirectories).ToList();
+            foreach (var repFile in replicaFiles)
+            {
+                ct.ThrowIfCancellationRequested();
+                var rel = Path.GetRelativePath(_replicaRoot, repFile);
+                if (seen.Contains(rel)) continue;
+
+                try
+                {
+                    File.Delete(repFile);
+                    _logger.Action($"DELETE  {rel}");
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error($"Failed to delete extra file '{rel}': {ex.Message}");
+                    _logger.Debug(ex.ToString());
+                }
+            }
+
+            DeleteEmptyExtraDirectories(ct);
             return Task.CompletedTask;
+        }
+
+        private void DeleteEmptyExtraDirectories(CancellationToken ct)
+        {
+            var dirs = Directory.EnumerateDirectories(_replicaRoot, "*", SearchOption.AllDirectories)
+                .OrderByDescending(d => d.Length).ToList();
+            foreach (var repDir in dirs)
+            {
+                ct.ThrowIfCancellationRequested();
+                var rel = Path.GetRelativePath(_replicaRoot, repDir);
+                var srcDir = Path.Combine(_sourceRoot, rel);
+                if (!Directory.Exists(srcDir))
+                {
+                    try
+                    {
+                        Directory.Delete(repDir, recursive: true);
+                        _logger.Action($"DELETE  {rel}");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"Failed to remove extra directory '{rel}': {ex.Message}");
+                        _logger.Debug(ex.ToString());
+                    }
+                }
+            }
+        }
+
+        private static bool FilesDiffer(string fileA, string fileB)
+        {
+            var a = new FileInfo(fileA);
+            var b = new FileInfo(fileB);
+            if (a.Length != b.Length) return true;
+            var dtA = a.LastWriteTimeUtc;
+            var dtB = b.LastWriteTimeUtc;
+            if (Math.Abs((dtA - dtB).TotalSeconds) < 2) return false;
+            using var md5 = MD5.Create();
+            using var sa = File.OpenRead(fileA);
+            using var sb = File.OpenRead(fileB);
+            var ha = md5.ComputeHash(sa);
+            var hb = md5.ComputeHash(sb);
+            return !ha.AsSpan().SequenceEqual(hb);
         }
     }
 }
