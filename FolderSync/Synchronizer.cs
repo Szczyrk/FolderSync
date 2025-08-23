@@ -19,6 +19,34 @@ namespace FolderSync
         {
             var sourceFiles = Directory.EnumerateFiles(_sourceRoot, "*", SearchOption.AllDirectories).ToList();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            CreateEmptyDirectories(ct);
+            CopyOrUpdateSourceFilesToReplica(ct, sourceFiles, seen);
+            DeleteReplicaFilesNotInSource(ct, seen);
+            DeleteEmptyExtraDirectories(ct);
+
+            return Task.CompletedTask;
+        }
+
+        private void CreateEmptyDirectories(CancellationToken ct)
+        {
+            var sourceDirs = Directory.EnumerateDirectories(_sourceRoot, "*", SearchOption.AllDirectories);
+            foreach (var srcDir in sourceDirs)
+            {
+                ct.ThrowIfCancellationRequested();
+                var rel = Path.GetRelativePath(_sourceRoot, srcDir);
+                var dstDir = Path.Combine(_replicaRoot, rel);
+                if (!Directory.Exists(dstDir))
+                {
+                    Directory.CreateDirectory(dstDir);
+                    _logger.Action($"MKDIR  {rel}");
+                }
+            }
+        }
+
+        private void CopyOrUpdateSourceFilesToReplica(CancellationToken ct, List<string> sourceFiles,
+            HashSet<string> seen)
+        {
             foreach (var srcFile in sourceFiles)
             {
                 ct.ThrowIfCancellationRequested();
@@ -44,7 +72,10 @@ namespace FolderSync
                     }
                 }
             }
+        }
 
+        private void DeleteReplicaFilesNotInSource(CancellationToken ct, HashSet<string> seen)
+        {
             var replicaFiles = Directory.EnumerateFiles(_replicaRoot, "*", SearchOption.AllDirectories).ToList();
             foreach (var repFile in replicaFiles)
             {
@@ -63,9 +94,6 @@ namespace FolderSync
                     _logger.Debug(ex.ToString());
                 }
             }
-
-            DeleteEmptyExtraDirectories(ct);
-            return Task.CompletedTask;
         }
 
         private void DeleteEmptyExtraDirectories(CancellationToken ct)
